@@ -13,7 +13,7 @@ from torch import optim, nn
 from torch.nn import functional as F
 from torchvision import models, transforms
 from torchvision.transforms import functional as TF
-import HRNet
+from style_transfer.src.HRNet import HRNet
 
 
 class VGGFeatures(nn.Module):
@@ -295,12 +295,52 @@ class STIterate:
     time: float
     gpu_ram: int
 
+class REDNet10(nn.Module):
+    def __init__(self, num_layers=5, num_features=64):
+        super(REDNet10, self).__init__()
+        conv_layers = []
+        deconv_layers = []
 
-class StyleTransfer:
+        conv_layers.append(nn.Sequential(nn.Conv2d(3, num_features, kernel_size=3, padding=1), nn.ReLU()))
+        for i in range(num_layers):
+            conv_layers.append(nn.Sequential(nn.Conv2d(num_features, num_features, kernel_size=3, padding=1), nn.ReLU()))
+        conv_layers.append(nn.Sequential(nn.Conv2d(num_features, 3, kernel_size=3, padding=1), nn.ReLU()))
+
+        self.conv_layers = nn.Sequential(*conv_layers)
+        self.relu = nn.ReLU()
+
+        # conv_layers.append(nn.Sequential(nn.Conv2d(3, num_features, kernel_size=3, stride=2, padding=1),
+        #                                  nn.ReLU()))
+        # for i in range(num_layers - 1):
+        #     conv_layers.append(nn.Sequential(nn.Conv2d(num_features, num_features, kernel_size=3, padding=1),
+        #                                      nn.ReLU()))
+
+        # for i in range(num_layers - 1):
+        #     deconv_layers.append(nn.Sequential(nn.ConvTranspose2d(num_features, num_features, kernel_size=3, padding=1),
+        #                                        nn.ReLU()))
+        # deconv_layers.append(nn.ConvTranspose2d(num_features, 3, kernel_size=3, stride=2, padding=1, output_padding=1))
+
+        # self.conv_layers = nn.Sequential(*conv_layers)
+        # self.deconv_layers = nn.Sequential(*deconv_layers)
+        # self.relu = nn.ReLU()
+
+    def forward(self, x):
+        residual = x
+        out = self.conv_layers(x)
+        # out = self.deconv_layers(out)
+        out += residual
+        out = self.relu(out)
+        return out
+
+
+class StyleTransfer_HRNet:
     def __init__(self, devices=['cpu'], pooling='max'):
+        print('Initializing StyleTransfer_HRNet()')
         self.devices = [torch.device(device) for device in devices]
         self.image = None       # the output at each iteration
         self.average = None     # the final result is an average among outputs of each iteration
+
+        self.stylized_image = None # store the output from style_net
 
         # The default content and style layers follow Gatys et al. (2015).
         self.content_layers = [22]
@@ -313,9 +353,12 @@ class StyleTransfer:
         # the normalized style weights for each style_layers
         self.style_weights = [w / weight_sum for w in style_weights]
 
+        # style_net: HRNet
+        self.style_net = HRNet()
+        # self.style_net = REDNet10()
+        self.style_net.to(self.devices[0])
         # the vgg model
-        self.model = VGGFeatures(
-            self.style_layers + self.content_layers, pooling=pooling)
+        self.model = VGGFeatures(self.style_layers + self.content_layers, pooling=pooling)
 
         # distribute model to two devices if possible
         if len(self.devices) == 1:
@@ -326,12 +369,14 @@ class StyleTransfer:
             raise ValueError('Only 1 or 2 devices are supported.')
         self.model.distribute_layers(device_plan)
 
+        print('Module Initialized')
+
     def get_image_tensor(self):
-        return self.average.get().detach()[0].clamp(0, 1)
+        return self.stylized_image.get().detach()[0].clamp(0, 1)
 
     def get_image(self, image_type='pil'):  # output the average image (but what's that?)
-        if self.average is not None:
-            image = self.get_image_tensor()
+        if self.stylized_image is not None:
+            image = self.stylized_image.detach()[0].clamp(0, 1)
             if image_type.lower() == 'pil':
                 return TF.to_pil_image(image)
             elif image_type.lower() == 'np_uint16':
@@ -342,15 +387,15 @@ class StyleTransfer:
 
     def stylize(self, content_image, sky_mask, style_images, *,
                 style_weights=None,
-                content_weight: float = 0.04,
-                grad_weight: float = 20,
+                content_weight: float = 0.02,
+                grad_weight: float = 5,
                 sky_weight: float = 1,
                 tv_weight: float = 2.,
                 min_scale: int = 128,
                 end_scale: int = 512,
-                iterations: int = 500,
+                iterations: int = 2000,
                 initial_iterations: int = 1000,
-                step_size: float = 0.02,
+                step_size: float = 2.0e-2,
                 avg_decay: float = 0.99,
                 init: str = 'content',
                 style_scale_fac: float = 1.,
@@ -368,167 +413,69 @@ class StyleTransfer:
             weight_sum = sum(abs(w) for w in style_weights)
             style_weights = [weight / weight_sum for weight in style_weights]
         if len(style_images) != len(style_weights):
-            raise ValueError(
-                'style_images and style_weights must have the same length')
+            raise ValueError('style_images and style_weights must have the same length')
 
         # add TVloss -> the sum of the absolute differences for neighboring pixel-values in the result image
         tv_loss = Scale(LayerApply(TVLoss(), 'input'), tv_weight)
 
-        # get a sequence of scales, from small to large
-        scales = gen_scales(min_scale, end_scale)
+        content_image = TF.to_tensor(content_image).unsqueeze_(0).to(self.devices[0])
+        # style_image = style_images[0].to(self.devices[0])
+        mask = TF.to_tensor(sky_mask).unsqueeze_(0).to(self.devices[0])
 
-        # set the initial image and load it to device
-        cw, ch = size_to_fit(content_image.size, scales[0], scale_up=True)
-        if init == 'content':
-            self.image = TF.to_tensor(
-                content_image.resize((cw, ch), Image.LANCZOS))[None]
-        elif init == 'gray':
-            self.image = torch.rand([1, 3, ch, cw]) / 255 + 0.5
-        elif init == 'uniform':
-            self.image = torch.rand([1, 3, ch, cw])
-        elif init == 'style_mean':
-            means = []
-            for i, image in enumerate(style_images):
-                means.append(TF.to_tensor(image).mean(
-                    dim=(1, 2)) * style_weights[i])
-            self.image = torch.rand([1, 3, ch, cw]) / \
-                255 + sum(means)[None, :, None, None]
-        else:
-            raise ValueError(
-                "init must be one of 'content', 'gray', 'uniform', 'style_mean'")
-        self.image = self.image.to(self.devices[0])  # the original input
-
-        # style net
-        style_net = HRNet.HRNet()
-        style_net.to(self.devices[0])
-
-        if self.devices[0].type == 'cuda':
-            torch.cuda.empty_cache()
-
-        content = content_image.to(self.devices[0])
-        style = style_images[0].to(self.devices[0])
-        mask = sky_mask.to(self.devices[0])
-
-        grad_loss = Scale(LayerApply(GradientLoss(content, mask, sky_weight), 'input'), grad_weight)
+        # add GradientLoss
+        grad_loss = Scale(LayerApply(GradientLoss(content_image, mask, sky_weight), 'input'), grad_weight)
 
         # add ContentLoss
-        content_feats = self.model(content, layers=self.content_layers)
+        content_feats = self.model(content_image, layers=self.content_layers)
         content_losses = []
         for layer, weight in zip(self.content_layers, content_weights):
             target = content_feats[layer]  # target content feature
-            # how to calculate content loss?
             content_losses.append(Scale(LayerApply(ContentLoss(target), layer), weight))
-        
 
-
-        opt = None
-        # Stylize the image at successively finer scales, each greater by a factor of sqrt(2).
-        # This differs from the scheme given in Gatys et al. (2016).
-        for scale in scales:
-            if self.devices[0].type == 'cuda':
-                torch.cuda.empty_cache()
-
-            # resize the content image to be smaller than [scale * scale] -> target size
-            cw, ch = size_to_fit(content_image.size, scale, scale_up=True)
-            content = TF.to_tensor(content_image.resize(
-                (cw, ch), Image.LANCZOS))[None]
-            content = content.to(self.devices[0])
-
-            # resize the mask along with the content iamge
-            mask = TF.to_tensor(sky_mask.resize((cw, ch), Image.LANCZOS))[None]
-            mask = mask.to(self.devices[0])
-
-            grad_loss = Scale(LayerApply(GradientLoss(
-                content, mask, sky_weight), 'input'), grad_weight)
-
-            # interpolate the initial image to the target size
-            self.image = interpolate(self.image.detach(), (ch, cw), mode='bicubic').clamp(0, 1)
-            # averaging across the time??
-            self.average = EMA(self.image, avg_decay)
-            self.image.requires_grad_()
-
-            print(f'Processing content image ({cw}x{ch})...')
-            # add ContentLoss
-            content_feats = self.model(content, layers=self.content_layers)
-            content_losses = []
-            for layer, weight in zip(self.content_layers, content_weights):
-                target = content_feats[layer]  # target content feature
-                # how to calculate content loss?
-                content_losses.append(
-                    Scale(LayerApply(ContentLoss(target), layer), weight))
-
-            style_targets, style_losses = {}, []
-            # add StyleLoss
-            for i, image in enumerate(style_images):
-                # resize the image and load it to GPU
-                if style_size is None:
-                    sw, sh = size_to_fit(
-                        image.size, round(scale * style_scale_fac))
+        style_targets, style_losses = {}, []
+        # add StyleLoss
+        for i, image in enumerate(style_images):
+            style = TF.to_tensor(image).unsqueeze_(0).to(self.devices[0])
+            style_feats = self.model(style, layers=self.style_layers)
+            # Take the weighted average of multiple style targets (Gram matrices).
+            for layer in self.style_layers:
+                target = StyleLoss.get_target(style_feats[layer]) * style_weights[i]
+                if layer not in style_targets:
+                    style_targets[layer] = target
                 else:
-                    sw, sh = size_to_fit(image.size, style_size)
-                style = TF.to_tensor(image.resize(
-                    (sw, sh), Image.LANCZOS))[None]
-                style = style.to(self.devices[0])
+                    style_targets[layer] += target
+        for layer, weight in zip(self.style_layers, self.style_weights):
+            target = style_targets[layer]
+            style_losses.append(Scale(LayerApply(StyleLoss(target), layer), weight))
 
-                print(f'Processing style image ({sw}x{sh})...')
-                style_feats = self.model(style, layers=self.style_layers)
-                # Take the weighted average of multiple style targets (Gram matrices).
-                for layer in self.style_layers:
-                    target = StyleLoss.get_target(
-                        style_feats[layer]) * style_weights[i]
-                    if layer not in style_targets:
-                        style_targets[layer] = target
-                    else:
-                        style_targets[layer] += target
-            for layer, weight in zip(self.style_layers, self.style_weights):
-                target = style_targets[layer]
-                style_losses.append(
-                    Scale(LayerApply(StyleLoss(target), layer), weight))
+        # Construct a list of losses
+        crit = SumLoss([*content_losses, *style_losses, tv_loss, grad_loss])
 
-            # Construct a list of losses
-            crit = SumLoss(
-                [*content_losses, *style_losses, tv_loss, grad_loss])
+        # initialize the optimizer
+        opt = optim.Adam(self.style_net.parameters(), lr=step_size)
+        torch.autograd.set_detect_anomaly(True)
 
-            # Warm-start the Adam optimizer if this is not the first scale. (load the previous optimizer state)
-            opt2 = optim.Adam([self.image], lr=step_size)
-            if scale != scales[0]:
-                opt_state = scale_adam(opt.state_dict(), (ch, cw))
-                opt2.load_state_dict(opt_state)
-            opt = opt2
+        # empty GPU cache
+        if self.devices[0].type == 'cuda':
+            torch.cuda.empty_cache()
 
-            # empty GPU cache
-            if self.devices[0].type == 'cuda':
-                torch.cuda.empty_cache()
+        # forward & backward propagation
+        for i in range(1, iterations + 1):
+            self.stylized_image = self.style_net(content_image)
+            feats = self.model(self.stylized_image)
+            loss = crit(feats)  # calculate all the losses at the same time
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
 
-            # forward & backward propagation
-            # first scale: 1000, others: 500
-            actual_its = initial_iterations if scale == scales[0] else iterations
-            for i in range(1, actual_its + 1):
-                feats = self.model(self.image)
-                loss = crit(feats)  # calculate all the losses at the same time
-                opt.zero_grad()
-                loss.backward()
-                opt.step()
-
-                # Enforce box constraints.
-                with torch.no_grad():
-                    self.image.clamp_(0, 1)
-
-                # do averaging along time (to be investigated)
-                self.average.update(self.image)
-
-                # what does a callback function do? (to be investigated)
-                if callback is not None:
+            if callback is not None:
                     gpu_ram = 0
                     for device in self.devices:
                         if device.type == 'cuda':
-                            gpu_ram = max(
-                                gpu_ram, torch.cuda.max_memory_allocated(device))
-                    callback(STIterate(w=cw, h=ch, i=i, i_max=actual_its, loss=loss.item(),
+                            gpu_ram = max(gpu_ram, torch.cuda.max_memory_allocated(device))
+                    callback(STIterate(w=1280, h=1280, i=i, i_max=iterations, loss=loss.item(),
                                        time=time.time(), gpu_ram=gpu_ram))
 
-            # Initialize each new scale with the previous scale's averaged iterate.
-            with torch.no_grad():
-                self.image.copy_(self.average.get())
+        # self.stylized_image = self.style_net(content_image)
 
         return self.get_image()

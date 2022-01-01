@@ -39,7 +39,7 @@ class BasicBlock(nn.Module):
         super(BasicBlock, self).__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
-        self.relu = nn.ReLU(inplace=True) # 1
+        self.relu = nn.ReLU(inplace=False) # 1
 
         self.identity_block = nn.Sequential(
             ConvLayer(in_channels, out_channels // 4, kernel_size=1, stride=1),
@@ -63,7 +63,7 @@ class BasicBlock(nn.Module):
             residual = x
         else: 
             residual = self.shortcut(x)
-        out += residual
+        out = out + residual
         out = self.relu(out)
 
         return out
@@ -79,7 +79,7 @@ class Upsample(nn.Module):
         self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=2, padding=1)
         self.upsample = nn.Upsample(scale_factor=scale_factor, mode='nearest')
         self.instance = nn.InstanceNorm2d(out_channels)
-        self.relu = nn.ReLU(inplace=True)
+        self.relu = nn.ReLU(inplace=False)
 
     def forward(self, x):
         out = self.conv(x)

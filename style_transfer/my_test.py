@@ -12,5 +12,6 @@ from torch.nn import functional as F
 from torchvision import models, transforms
 from torchvision.transforms import functional as TF
 
-s = 'ust4.jpg'
-print(s.split('.')[0])
+filename = './images/content/ust4.jpg'
+image = Image.open(filename)
+image_interp = interpolate(exp_avg, shape, mode='bicubic')

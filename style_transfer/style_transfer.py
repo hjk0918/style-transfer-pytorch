@@ -337,9 +337,9 @@ class StyleTransfer:
 
     def stylize(self, content_image, sky_mask, style_images, *,
                 style_weights=None,
-                content_weight: float = 0.04,
-                grad_weight: float = 20,
-                sky_weight: float = 1.5,
+                content_weight: float = 0.03,
+                grad_weight: float = 10,
+                sky_weight: float = 2,
                 tv_weight: float = 2.,
                 min_scale: int = 128,
                 end_scale: int = 512,

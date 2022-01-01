@@ -17,7 +17,7 @@ import torch
 import torch.multiprocessing as mp
 from tqdm import tqdm
 
-from style_transfer import srgb_profile, StyleTransfer, WebInterface
+from style_transfer import srgb_profile, StyleTransfer, WebInterface, style_transfer_HRNet
 
 
 def prof_to_prof(image, src_prof, dst_prof, **kwargs):
@@ -156,13 +156,14 @@ def main():
 
     content_dir = './images/content/'
     style_dir = './images/styles/'
-    my_content_image = 'ust1.jpg'
+    mask_dir = './images/mask/'
+    my_content_image = '28.jpg'
     my_style_images = ['neon1.jpg']
-    output_name = './results/neon1/neon1_ust1_cw0.04_gw20_sw1.5_mask_laplacian.png'
+    output_name = './results/neon1/output_28.png'
 
     # files
     p.add_argument('--content', type=str, default=(content_dir+my_content_image), help='the content image')
-    p.add_argument('--sky_mask', type=str, default=(content_dir+my_content_image.split('.')[0]+'_skymask.jpg'))
+    p.add_argument('--sky_mask', type=str, default=(mask_dir+'ust' + my_content_image.split('.')[0]+'_mask.jpg'))
     p.add_argument('--styles', type=str, default=[(style_dir+i) for i in my_style_images], nargs='+', metavar='style', help='the style images')
     p.add_argument('--output', '-o', type=str, default=output_name, help='the output image')
 
@@ -262,6 +263,7 @@ def main():
     # do style transfer
     defaults = StyleTransfer.stylize.__kwdefaults__ # get the default keyword dictionary
     st_kwargs = {k: v for k, v in args.__dict__.items() if k in defaults} # find modified args and put them into an array
+    print(st_kwargs)
     try:
         st.stylize(content_img, sky_mask, style_imgs, **st_kwargs, callback=callback) # stylize
     except KeyboardInterrupt:
