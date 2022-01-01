@@ -1,5 +1,7 @@
 # Improvements towards Cyberpunk Style Transfer
 
+teammates: Huang Junkai, Huang Yiming, Liu Pak Hin
+
 We leveraged gradient loss and segmentation to improve neural style transfer pipeline.
 
 <p align="center" width="75%">
