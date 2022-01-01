@@ -1,3 +1,12 @@
+# Improvements towards Cyberpunk Style Transfer
+
+We leveraged gradient loss and segmentation to improve neural style transfer pipeline.
+
+<p align="center" width="75%">
+  <img src="./images/HKUST.jpg" width=400>  <img src="./images/HKUST_stylized.png" width="400">
+</p>
+
+
 # style-transfer-pytorch
 
 An implementation of neural style transfer ([A Neural Algorithm of Artistic Style](https://arxiv.org/abs/1508.06576)) in PyTorch, supporting CPUs and Nvidia GPUs. It does automatic multi-scale (coarse-to-fine) stylization to produce high-quality high resolution stylizations, even up to print resolution if the GPUs have sufficient memory. If two GPUs are available, they can both be used to increase the maximum resolution. (Using two GPUs is not faster than using one.)
